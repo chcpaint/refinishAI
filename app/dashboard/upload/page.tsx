@@ -41,6 +41,7 @@ const ESTIMATE_FIELDS = [
   { name: 'estimate_date', label: 'Estimate Date', required: true },
   { name: 'expected_start_date', label: 'Expected Start Date', required: false },
   { name: 'total_amount', label: 'Total Amount', required: false },
+  { name: 'claim_number', label: 'Claim Number', required: false },
   { name: 'status', label: 'Status', required: false },
 ]
 
@@ -327,35 +328,108 @@ export default function UploadPage() {
   }
 
   const parsePDFText = (text: string): ParsedRow[] => {
-    const data: ParsedRow[] = []
+    // One PDF = one estimate. Extract the BEST match for each field.
+    const row: ParsedRow = {}
 
-    // Try to find estimate/invoice patterns
-    const estimatePattern = /(?:Estimate|Invoice)[\s#:]*(\w+)/gi
-    const vinPattern = /VIN[:\s]*([A-HJ-NPR-Z0-9]{17})/gi
-    const amountPattern = /(?:Total|Amount)[:\s]*\$?([\d,]+\.?\d*)/gi
-    const datePattern = /(?:Date)[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi
-    const customerPattern = /(?:Customer|Name)[:\s]*([A-Za-z\s]+?)(?:\n|$)/gi
-
-    // Extract all matches
-    const estimates = Array.from(text.matchAll(estimatePattern))
-    const vins = Array.from(text.matchAll(vinPattern))
-    const amounts = Array.from(text.matchAll(amountPattern))
-    const dates = Array.from(text.matchAll(datePattern))
-    const customers = Array.from(text.matchAll(customerPattern))
-
-    // Create rows from extracted data
-    const maxRows = Math.max(estimates.length, vins.length, 1)
-    for (let i = 0; i < maxRows; i++) {
-      data.push({
-        'Estimate/Invoice #': estimates[i]?.[1] || '',
-        'VIN': vins[i]?.[1] || '',
-        'Total Amount': amounts[i]?.[1]?.replace(',', '') || '',
-        'Date': dates[i]?.[1] || '',
-        'Customer': customers[i]?.[1]?.trim() || ''
-      })
+    // --- Estimate/Invoice Number ---
+    // Look for explicit number patterns like "Estimate #12345", "Estimate Number: 12345", "Invoice #INV-001"
+    const estimateNumPatterns = [
+      /(?:Estimate|Invoice|Claim|RO|Repair\s*Order)[\s]*(?:#|No\.?|Number|Num)?[:\s]*([A-Z0-9][\w\-]{2,})/i,
+      /(?:#|No\.?)\s*([A-Z0-9][\w\-]{3,})/i,
+    ]
+    for (const pattern of estimateNumPatterns) {
+      const match = text.match(pattern)
+      if (match?.[1]) {
+        row['Estimate Number'] = match[1].trim()
+        break
+      }
     }
 
-    return data.filter(row => Object.values(row).some(v => v))
+    // --- VIN (always 17 chars, specific charset) ---
+    const vinMatch = text.match(/(?:VIN|Vehicle\s*Id(?:entification)?)[:\s#]*([A-HJ-NPR-Z0-9]{17})/i)
+      || text.match(/\b([A-HJ-NPR-Z0-9]{17})\b/)
+    if (vinMatch?.[1]) {
+      row['VIN'] = vinMatch[1]
+    }
+
+    // --- Customer Name ---
+    const customerPatterns = [
+      /(?:Customer|Insured|Owner|Claimant)[:\s]+([A-Za-z][A-Za-z\s,.'-]{2,40})/i,
+      /(?:Name)[:\s]+([A-Z][A-Za-z\s,.'-]{2,40})/i,
+    ]
+    for (const pattern of customerPatterns) {
+      const match = text.match(pattern)
+      if (match?.[1]) {
+        // Clean up: remove trailing whitespace/punctuation
+        row['Customer Name'] = match[1].replace(/[\s,]+$/, '').trim()
+        break
+      }
+    }
+
+    // --- Vehicle Info (Year Make Model) ---
+    const vehicleMatch = text.match(/(?:Vehicle|Year\/Make\/Model|YMM)[:\s]*((?:19|20)\d{2})\s+([A-Za-z][A-Za-z\s\-]{2,30})/i)
+      || text.match(/\b((?:19|20)\d{2})\s+((?:Ford|Chevy|Chevrolet|Toyota|Honda|Nissan|Dodge|Ram|Jeep|BMW|Mercedes|Audi|Lexus|Kia|Hyundai|Subaru|Mazda|Volkswagen|VW|Buick|Cadillac|GMC|Lincoln|Acura|Infiniti|Volvo|Tesla|Chrysler|Pontiac|Saturn)[A-Za-z\s\-]{0,30})/i)
+    if (vehicleMatch) {
+      row['Vehicle'] = vehicleMatch[0].trim().substring(0, 50)
+    }
+
+    // --- Dates ---
+    const datePatterns = [
+      /(?:Estimate\s*Date|Date\s*of\s*(?:Loss|Estimate)|Written|Created)[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+      /(?:Date)[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+      /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})/,
+    ]
+    for (const pattern of datePatterns) {
+      const match = text.match(pattern)
+      if (match?.[1]) {
+        row['Estimate Date'] = match[1]
+        break
+      }
+    }
+
+    // --- Total Amount (find the LARGEST dollar amount, likely the grand total) ---
+    const amountMatches = Array.from(text.matchAll(/\$\s*([\d,]+\.?\d{0,2})/g))
+    if (amountMatches.length > 0) {
+      let maxAmount = 0
+      let maxAmountStr = ''
+      for (const m of amountMatches) {
+        const val = parseFloat(m[1].replace(/,/g, ''))
+        if (val > maxAmount) {
+          maxAmount = val
+          maxAmountStr = m[1].replace(/,/g, '')
+        }
+      }
+      if (maxAmount > 0) {
+        row['Total Amount'] = maxAmountStr
+      }
+    } else {
+      // Fallback: look for "Total" followed by a number
+      const totalMatch = text.match(/(?:Grand\s*Total|Net\s*Total|Total)[:\s]*\$?\s*([\d,]+\.\d{2})/i)
+      if (totalMatch?.[1]) {
+        row['Total Amount'] = totalMatch[1].replace(/,/g, '')
+      }
+    }
+
+    // --- Insurance / Claim ---
+    const insuranceMatch = text.match(/(?:Insurance|Carrier|Insurer)[:\s]+([A-Za-z][A-Za-z\s&,.'-]{2,50})/i)
+    if (insuranceMatch?.[1]) {
+      row['Insurance'] = insuranceMatch[1].replace(/[\s,]+$/, '').trim()
+    }
+
+    const claimMatch = text.match(/(?:Claim|Claim\s*#|Claim\s*No)[:\s]*([A-Z0-9][\w\-]{3,})/i)
+    if (claimMatch?.[1]) {
+      row['Claim Number'] = claimMatch[1].trim()
+    }
+
+    // --- Labor Hours ---
+    const laborMatch = text.match(/(?:Total\s*)?(?:Labor|Labour)\s*(?:Hours)?[:\s]*([\d.]+)/i)
+    if (laborMatch?.[1]) {
+      row['Labor Hours'] = laborMatch[1]
+    }
+
+    // Only return a row if we extracted at least an estimate number, VIN, or amount
+    const hasUsefulData = row['Estimate Number'] || row['VIN'] || row['Total Amount'] || row['Customer Name']
+    return hasUsefulData ? [row] : []
   }
 
   const autoMapFields = (fileHeaders: string[]) => {
