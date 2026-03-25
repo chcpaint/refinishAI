@@ -272,11 +272,22 @@ export default function UploadPage() {
       // Dynamic import of pdfjs-dist
       const pdfjsLib = await import('pdfjs-dist')
 
-      // Set worker path
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`
+      // Use local worker from public directory (avoids CDN failures that cause hangs)
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
 
       const arrayBuffer = await pdfFile.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+
+      // Wrap PDF loading in a timeout to prevent infinite spinner
+      const loadPDF = async () => {
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer })
+        return await loadingTask.promise
+      }
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF parsing timed out after 30 seconds. Please try a CSV or Excel file instead.')), 30000)
+      )
+
+      const pdf = await Promise.race([loadPDF(), timeoutPromise])
 
       let fullText = ''
 
@@ -306,9 +317,12 @@ export default function UploadPage() {
       setParsedData(data)
       autoMapFields(fileHeaders)
       setShowMapping(true)
-    } catch (error) {
+    } catch (error: any) {
       console.error('PDF parse error:', error)
-      setResult({ success: false, message: 'Error parsing PDF file.' })
+      const message = error?.message?.includes('timed out')
+        ? error.message
+        : 'Error parsing PDF file. Try uploading a CSV or Excel file instead.'
+      setResult({ success: false, message })
     }
   }
 
