@@ -75,6 +75,19 @@ export interface ConsumptionPattern {
   seasonalFactor: number
 }
 
+// Minimum data thresholds - hard gate before projecting
+const MIN_INVOICES_FOR_PROJECTION = 50
+const MIN_CONSUMPTION_FOR_PROJECTION = 100
+
+export interface InsufficientDataResult {
+  insufficient_data: true
+  message: string
+  invoiceCount: number
+  consumptionCount: number
+  requiredInvoices: number
+  requiredConsumption: number
+}
+
 // Cost Projection Engine Class
 export class CostProjectionEngine {
   private supabase: SupabaseClient
@@ -89,18 +102,30 @@ export class CostProjectionEngine {
   async generateProjection(
     companyId: string,
     periodWeeks: number = 4
-  ): Promise<CostProjection> {
+  ): Promise<CostProjection | InsufficientDataResult> {
     const startDate = new Date()
     const endDate = new Date()
     endDate.setDate(endDate.getDate() + periodWeeks * 7)
 
-    // Get historical data
+    // Get historical data - scoped to this company
     const [invoices, estimates, consumption, products] = await Promise.all([
       this.getHistoricalInvoices(companyId, 90), // Last 90 days
       this.getUpcomingEstimates(companyId),
       this.getConsumptionHistory(companyId, 90),
       this.getProducts(companyId)
     ])
+
+    // HARD GATE: Require minimum data before projecting
+    if (invoices.length < MIN_INVOICES_FOR_PROJECTION || consumption.length < MIN_CONSUMPTION_FOR_PROJECTION) {
+      return {
+        insufficient_data: true,
+        message: `Insufficient data for reliable projections. Need at least ${MIN_INVOICES_FOR_PROJECTION} invoices (have ${invoices.length}) and ${MIN_CONSUMPTION_FOR_PROJECTION} consumption records (have ${consumption.length}) within the last 90 days.`,
+        invoiceCount: invoices.length,
+        consumptionCount: consumption.length,
+        requiredInvoices: MIN_INVOICES_FOR_PROJECTION,
+        requiredConsumption: MIN_CONSUMPTION_FOR_PROJECTION
+      }
+    }
 
     // Calculate averages - use actual labor/material breakdown if available
     const avgJobsPerWeek = invoices.length / 13 // 90 days = ~13 weeks
@@ -241,16 +266,30 @@ export class CostProjectionEngine {
     const totalWaste = totalActual - totalExpected
     const overallWastePercent = totalExpected > 0 ? (totalWaste / totalExpected) * 100 : 0
 
-    // Get waste trends (mock - would need historical tracking)
-    const trends: WasteTrend[] = []
-    for (let i = 5; i >= 0; i--) {
-      const month = new Date()
-      month.setMonth(month.getMonth() - i)
-      trends.push({
-        month: month.toLocaleString('default', { month: 'short' }),
-        wastePercent: 12 + Math.random() * 8 - 4 // Mock trend data
-      })
+    // Calculate real waste trends from consumption data grouped by month
+    const monthlyWaste = new Map<string, { expected: number; actual: number }>()
+    for (const c of consumption) {
+      const date = new Date(c.completion_date || c.created_at)
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+      const existing = monthlyWaste.get(monthKey) || { expected: 0, actual: 0 }
+      existing.expected += c.estimated_quantity || 0
+      existing.actual += c.actual_quantity || c.quantity_used || 0
+      monthlyWaste.set(monthKey, existing)
     }
+
+    const trends: WasteTrend[] = Array.from(monthlyWaste.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-6) // Last 6 months
+      .map(([key, data]) => {
+        const [year, month] = key.split('-').map(Number)
+        const monthName = new Date(year, month - 1).toLocaleString('default', { month: 'short' })
+        const waste = data.actual - data.expected
+        const wastePercent = data.expected > 0 ? (waste / data.expected) * 100 : 0
+        return {
+          month: monthName,
+          wastePercent: Math.round(wastePercent * 10) / 10
+        }
+      })
 
     // Generate suggestions
     const suggestions = this.generateWasteSuggestions(byCategory)
@@ -368,6 +407,7 @@ export class CostProjectionEngine {
     const { data } = await this.supabase
       .from('invoices')
       .select('*')
+      .eq('company_id', companyId)
       .gte('invoice_date', startDate.toISOString().split('T')[0])
       .order('invoice_date', { ascending: false })
 
@@ -409,6 +449,7 @@ export class CostProjectionEngine {
     const { data } = await this.supabase
       .from('products')
       .select('*')
+      .eq('company_id', companyId)
 
     return data || []
   }
@@ -428,34 +469,51 @@ export class CostProjectionEngine {
     projectedJobs: number,
     historicalJobs: number
   ): Promise<CategoryBreakdown[]> {
-    const categoryMap = new Map<string, { qty: number; cost: number }>()
+    // Split consumption into current half and prior half for real trend comparison
+    const sorted = [...consumption].sort((a, b) =>
+      new Date(a.completion_date || a.created_at).getTime() - new Date(b.completion_date || b.created_at).getTime()
+    )
+    const midpoint = Math.floor(sorted.length / 2)
+    const priorHalf = sorted.slice(0, midpoint)
+    const currentHalf = sorted.slice(midpoint)
 
-    for (const c of consumption) {
-      const product = products.find(p => p.id === c.product_id)
-      if (!product) continue
-
-      const category = product.category || 'Other'
-      const existing = categoryMap.get(category) || { qty: 0, cost: 0 }
-      const qty = c.actual_quantity || c.quantity_used || 0
-      const unitCost = c.cost_per_unit || product.unit_cost || product.cost || 0
-      categoryMap.set(category, {
-        qty: existing.qty + qty,
-        cost: existing.cost + (qty * unitCost)
-      })
+    // Build category cost maps for both periods
+    const buildCategoryMap = (records: any[]) => {
+      const map = new Map<string, { qty: number; cost: number }>()
+      for (const c of records) {
+        const product = products.find(p => p.id === c.product_id)
+        if (!product) continue
+        const category = product.category || 'Other'
+        const existing = map.get(category) || { qty: 0, cost: 0 }
+        const qty = c.actual_quantity || c.quantity_used || 0
+        const unitCost = c.cost_per_unit || product.unit_cost || product.cost || 0
+        map.set(category, {
+          qty: existing.qty + qty,
+          cost: existing.cost + (qty * unitCost)
+        })
+      }
+      return map
     }
 
-    const totalCost = Array.from(categoryMap.values()).reduce((sum, c) => sum + c.cost, 0)
+    const currentMap = buildCategoryMap(currentHalf)
+    const priorMap = buildCategoryMap(priorHalf)
+    // Full period map for totals
+    const fullMap = buildCategoryMap(consumption)
+
+    const totalCost = Array.from(fullMap.values()).reduce((sum, c) => sum + c.cost, 0)
     const scaleFactor = historicalJobs > 0 ? projectedJobs / historicalJobs : 1
 
     const breakdown: CategoryBreakdown[] = []
-    categoryMap.forEach((data, category) => {
+    fullMap.forEach((data, category) => {
       const projectedQty = data.qty * scaleFactor
       const projectedCost = data.cost * scaleFactor
       const percentOfTotal = totalCost > 0 ? (data.cost / totalCost) * 100 : 0
 
-      // Simulate trend (would need historical comparison)
-      const trendPercent = (Math.random() - 0.5) * 20
-      const trend = trendPercent > 5 ? 'up' : trendPercent < -5 ? 'down' : 'stable'
+      // Real trend: compare current period cost to prior period cost
+      const currentCost = currentMap.get(category)?.cost || 0
+      const priorCost = priorMap.get(category)?.cost || 0
+      const trendPercent = priorCost > 0 ? ((currentCost - priorCost) / priorCost) * 100 : 0
+      const trend: 'up' | 'down' | 'stable' = trendPercent > 5 ? 'up' : trendPercent < -5 ? 'down' : 'stable'
 
       breakdown.push({
         category,
