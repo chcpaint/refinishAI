@@ -218,7 +218,21 @@ export class CostProjectionEngine {
       result_status: 'success',
       result_summary: `Projected ${estimatedJobs} jobs over ${periodWeeks} weeks: $${projectedTotalCost.toFixed(2)} total ($${projectedMaterialCost.toFixed(2)} material, $${projectedLaborCost.toFixed(2)} labor). Confidence: ${confidence}%`,
       execution_time_ms: Date.now() - projectionStart,
-      metadata: { periodWeeks, estimatedJobs, confidence }
+      metadata: {
+        periodWeeks,
+        estimatedJobs,
+        confidence,
+        invoice_ids: invoices.map((i: any) => i.id),
+        estimate_ids: estimates.map((e: any) => e.id),
+        invoice_date_range: invoices.length > 0
+          ? { from: invoices[invoices.length - 1]?.invoice_date, to: invoices[0]?.invoice_date }
+          : null,
+        avg_material_per_job: Math.round(avgMaterialCostPerJob * 100) / 100,
+        avg_labor_per_job: Math.round(avgLaborCostPerJob * 100) / 100,
+        avg_jobs_per_week: Math.round(avgJobsPerWeek * 100) / 100,
+        scheduled_jobs: scheduledJobs,
+        projected_from_history: projectedFromHistory
+      }
     })
 
     return {
@@ -361,7 +375,15 @@ export class CostProjectionEngine {
         ? `No consumption data for waste analysis over ${periodDays} days`
         : `Waste analysis: ${wasteResult.wastePercent}% overall waste ($${wasteResult.wasteCost}) across ${byCategory.length} categories over ${periodDays} days`,
       execution_time_ms: Date.now() - wasteStart,
-      metadata: { periodDays, categoryCount: byCategory.length, wastePercent: wasteResult.wastePercent }
+      metadata: {
+        periodDays,
+        categoryCount: byCategory.length,
+        wastePercent: wasteResult.wastePercent,
+        invoice_ids: invoices.map((i: any) => i.id),
+        total_material_cost: wasteResult.totalMaterialCost,
+        waste_cost: wasteResult.wasteCost,
+        categories: byCategory.map(c => ({ name: c.category, wastePercent: c.wastePercent, wasteCost: c.wasteCost }))
+      }
     })
 
     return wasteResult
