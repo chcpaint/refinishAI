@@ -22,7 +22,8 @@ import {
   ChevronDown,
   MoreHorizontal,
   User,
-  CreditCard
+  CreditCard,
+  Activity
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import CompanySwitcher from './CompanySwitcher'
@@ -103,6 +104,7 @@ export default function DashboardNav({ user, profile, companies = [] }: Dashboar
     { name: 'Billing', href: '/dashboard/company/billing', icon: CreditCard, show: isAdmin },
     { name: 'Admin', href: '/dashboard/admin', icon: Shield, show: userRole === 'super_admin' },
     { name: 'Benchmarks', href: '/dashboard/admin/benchmarks', icon: BarChart3, show: userRole === 'super_admin' },
+    { name: 'AI Activity', href: '/dashboard/admin/activity', icon: Activity, show: userRole === 'super_admin' },
     { name: 'Help', href: '/dashboard/help', icon: HelpCircle, show: true },
   ].filter(item => item.show)
 

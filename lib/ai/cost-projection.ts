@@ -3,6 +3,7 @@
 
 import { SupabaseClient } from '@supabase/supabase-js'
 import { LaborRateService } from '@/lib/labor-rates'
+import { AIActivityLogger } from './activity-logger'
 
 // Types
 export interface CostProjection {
@@ -92,10 +93,12 @@ export interface InsufficientDataResult {
 export class CostProjectionEngine {
   private supabase: SupabaseClient
   private laborRateService: LaborRateService
+  private activityLogger: AIActivityLogger
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase
     this.laborRateService = new LaborRateService(supabase)
+    this.activityLogger = new AIActivityLogger(supabase)
   }
 
   // Generate cost projections for a given period
@@ -103,6 +106,7 @@ export class CostProjectionEngine {
     companyId: string,
     periodWeeks: number = 4
   ): Promise<CostProjection | InsufficientDataResult> {
+    const projectionStart = Date.now()
     const startDate = new Date()
     const endDate = new Date()
     endDate.setDate(endDate.getDate() + periodWeeks * 7)
@@ -117,7 +121,7 @@ export class CostProjectionEngine {
 
     // HARD GATE: Require minimum data before projecting
     if (invoices.length < MIN_INVOICES_FOR_PROJECTION || consumption.length < MIN_CONSUMPTION_FOR_PROJECTION) {
-      return {
+      const result: InsufficientDataResult = {
         insufficient_data: true,
         message: `Insufficient data for reliable projections. Need at least ${MIN_INVOICES_FOR_PROJECTION} invoices (have ${invoices.length}) and ${MIN_CONSUMPTION_FOR_PROJECTION} consumption records (have ${consumption.length}) within the last 90 days.`,
         invoiceCount: invoices.length,
@@ -125,6 +129,23 @@ export class CostProjectionEngine {
         requiredInvoices: MIN_INVOICES_FOR_PROJECTION,
         requiredConsumption: MIN_CONSUMPTION_FOR_PROJECTION
       }
+
+      // Log the rejection
+      this.activityLogger.log({
+        company_id: companyId,
+        activity_type: 'insufficient_data',
+        method: 'generateProjection',
+        computation_type: 'rule_based',
+        input_invoice_count: invoices.length,
+        input_consumption_count: consumption.length,
+        input_product_count: products.length,
+        data_period_days: 90,
+        result_status: 'rejected',
+        result_summary: `Projection rejected: ${invoices.length} invoices (need ${MIN_INVOICES_FOR_PROJECTION}), ${consumption.length} consumption (need ${MIN_CONSUMPTION_FOR_PROJECTION})`,
+        execution_time_ms: Date.now() - projectionStart
+      })
+
+      return result
     }
 
     // Calculate averages - use actual labor/material breakdown if available
@@ -183,6 +204,23 @@ export class CostProjectionEngine {
       estimates
     )
 
+    // Log successful base calculation
+    this.activityLogger.log({
+      company_id: companyId,
+      activity_type: 'base_calculation',
+      method: 'generateProjection',
+      computation_type: 'rule_based',
+      input_invoice_count: invoices.length,
+      input_consumption_count: consumption.length,
+      input_product_count: products.length,
+      data_period_days: 90,
+      confidence_score: confidence,
+      result_status: 'success',
+      result_summary: `Projected ${estimatedJobs} jobs over ${periodWeeks} weeks: $${projectedTotalCost.toFixed(2)} total ($${projectedMaterialCost.toFixed(2)} material, $${projectedLaborCost.toFixed(2)} labor). Confidence: ${confidence}%`,
+      execution_time_ms: Date.now() - projectionStart,
+      metadata: { periodWeeks, estimatedJobs, confidence }
+    })
+
     return {
       period: `${periodWeeks} weeks`,
       startDate: startDate.toISOString().split('T')[0],
@@ -202,6 +240,7 @@ export class CostProjectionEngine {
     companyId: string,
     periodDays: number = 30
   ): Promise<WasteAnalysis> {
+    const wasteStart = Date.now()
     const consumption = await this.getConsumptionHistory(companyId, periodDays)
     const products = await this.getProducts(companyId)
     const invoices = await this.getHistoricalInvoices(companyId, periodDays)
@@ -294,7 +333,7 @@ export class CostProjectionEngine {
     // Generate suggestions
     const suggestions = this.generateWasteSuggestions(byCategory)
 
-    return {
+    const wasteResult = {
       period: `Last ${periodDays} days`,
       totalMaterialCost: Math.round(totalMaterialCost * 100) / 100,
       actualUsed: Math.round(totalActual * 100) / 100,
@@ -305,12 +344,34 @@ export class CostProjectionEngine {
       trends,
       suggestions
     }
+
+    // Log waste analysis activity
+    const wasteActivityType = consumption.length === 0 ? 'fallback_no_data' as const : 'base_calculation' as const
+    this.activityLogger.log({
+      company_id: companyId,
+      activity_type: wasteActivityType,
+      method: 'analyzeWaste',
+      computation_type: 'rule_based',
+      input_invoice_count: invoices.length,
+      input_consumption_count: consumption.length,
+      input_product_count: products.length,
+      data_period_days: periodDays,
+      result_status: consumption.length === 0 ? 'partial' : 'success',
+      result_summary: consumption.length === 0
+        ? `No consumption data for waste analysis over ${periodDays} days`
+        : `Waste analysis: ${wasteResult.wastePercent}% overall waste ($${wasteResult.wasteCost}) across ${byCategory.length} categories over ${periodDays} days`,
+      execution_time_ms: Date.now() - wasteStart,
+      metadata: { periodDays, categoryCount: byCategory.length, wastePercent: wasteResult.wastePercent }
+    })
+
+    return wasteResult
   }
 
   // Analyze consumption patterns
   async analyzeConsumptionPatterns(
     companyId: string
   ): Promise<ConsumptionPattern[]> {
+    const patternStart = Date.now()
     const consumption = await this.getConsumptionHistory(companyId, 90)
     const products = await this.getProducts(companyId)
 
@@ -368,7 +429,26 @@ export class CostProjectionEngine {
       })
     })
 
-    return patterns.sort((a, b) => b.avgMonthlyUsage - a.avgMonthlyUsage)
+    const sortedPatterns = patterns.sort((a, b) => b.avgMonthlyUsage - a.avgMonthlyUsage)
+
+    // Log consumption pattern analysis
+    this.activityLogger.log({
+      company_id: companyId,
+      activity_type: consumption.length === 0 ? 'fallback_no_data' : 'base_calculation',
+      method: 'analyzeConsumptionPatterns',
+      computation_type: 'statistical',
+      input_consumption_count: consumption.length,
+      input_product_count: products.length,
+      data_period_days: 90,
+      result_status: consumption.length === 0 ? 'partial' : 'success',
+      result_summary: consumption.length === 0
+        ? 'No consumption data for pattern analysis'
+        : `Analyzed ${sortedPatterns.length} product consumption patterns from ${consumption.length} records over 90 days`,
+      execution_time_ms: Date.now() - patternStart,
+      metadata: { patternCount: sortedPatterns.length }
+    })
+
+    return sortedPatterns
   }
 
   // Calculate labor cost for an estimate using insurance rates
