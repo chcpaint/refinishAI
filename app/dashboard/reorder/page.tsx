@@ -6,8 +6,9 @@ import {
   Package, AlertTriangle, Clock, Download, Printer, RefreshCw,
   Filter, ChevronDown, ChevronUp, Search, FileSpreadsheet, FileText,
   CheckCircle, AlertCircle, Info, ShoppingCart, Truck, MapPin,
-  Save, X, Shield
+  Save, X, Shield, Settings
 } from 'lucide-react'
+import ReorderPresets from '@/components/ReorderPresets'
 import {
   ReorderReportService,
   type ReorderReport,
@@ -58,6 +59,10 @@ export default function ReorderReportPage() {
   const [saving, setSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null)
 
+  // Reorder presets
+  const [showPresets, setShowPresets] = useState(false)
+  const [userRole, setUserRole] = useState<string>('staff')
+
   useEffect(() => {
     loadReport()
   }, [])
@@ -72,12 +77,13 @@ export default function ReorderReportPage() {
 
       const { data: profile } = await supabase
         .from('user_profiles')
-        .select('company_id, companies(name, address, city, state, zip, phone)')
+        .select('role, company_id, companies(name, address, city, state, zip, phone)')
         .eq('id', user.id)
         .single()
 
       if (!profile?.company_id) throw new Error('No company found')
       setCompanyId(profile.company_id)
+      setUserRole(profile.role || 'staff')
 
       const co = profile.companies as any
       const coData = Array.isArray(co) ? co[0] : co
@@ -293,6 +299,13 @@ export default function ReorderReportPage() {
               <h1 className="text-2xl font-bold text-white flex items-center gap-2">
                 <ShoppingCart className="w-7 h-7 text-blue-400" />
                 Reorder & Purchasing
+                <button
+                  onClick={() => setShowPresets(true)}
+                  className="ml-2 p-1.5 rounded-lg bg-slate-600/50 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors"
+                  title="Reorder Presets"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
               </h1>
               <div className="flex items-center gap-3 mt-2">
                 <p className="text-slate-300 text-sm">
@@ -852,6 +865,15 @@ export default function ReorderReportPage() {
             </div>
           </div>
         </div>
+      )}
+      {/* Reorder Presets Modal */}
+      {showPresets && companyId && (
+        <ReorderPresets
+          companyId={companyId}
+          isAdmin={userRole === 'admin' || userRole === 'super_admin'}
+          onClose={() => setShowPresets(false)}
+          onSaved={() => loadReport()}
+        />
       )}
     </div>
   )

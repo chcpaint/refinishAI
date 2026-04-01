@@ -76,6 +76,38 @@ export interface ReorderReport {
     urgentThresholdDays: number
     includeOptional: boolean
   }
+
+  // Company presets used for this report
+  companyPresets: {
+    defaultReorderPoint: number
+    defaultOrderQuantity: number
+    deliveriesPerWeek: number
+    deliverySchedule: string
+    deliveryDays: string[]
+    leadTimeDays: number
+    daysBetweenDeliveries: number
+    safetyStockDays: number
+    maxInventoryDollars: number | null
+    minInventoryDollars: number | null
+  }
+}
+
+export interface CompanyReorderSettings {
+  default_reorder_point: number
+  default_order_quantity: number
+  deliveries_per_week: number
+  delivery_schedule: string
+  delivery_days: string[]
+  lead_time_days: number
+  max_inventory_dollars: number | null
+  min_inventory_dollars: number | null
+  target_inventory_dollars: number | null
+  safety_stock_days: number
+  safety_stock_method: string
+  safety_stock_value: number
+  order_multiple: number
+  min_order_value: number | null
+  consolidate_orders: boolean
 }
 
 export interface ReorderReportOptions {
@@ -100,10 +132,40 @@ export class ReorderReportService {
     options: ReorderReportOptions = {},
     paintLineFilter?: PaintLineFilter
   ): Promise<ReorderReport> {
+    // Fetch company reorder presets (or use defaults)
+    const { data: companyPresets } = await this.supabase
+      .from('company_reorder_settings')
+      .select('*')
+      .eq('company_id', companyId)
+      .single()
+
+    const presets: CompanyReorderSettings = companyPresets || {
+      default_reorder_point: 3,
+      default_order_quantity: 4,
+      deliveries_per_week: 2,
+      delivery_schedule: 'twice_weekly',
+      delivery_days: ['Tuesday', 'Thursday'],
+      lead_time_days: 1,
+      max_inventory_dollars: null,
+      min_inventory_dollars: null,
+      target_inventory_dollars: null,
+      safety_stock_days: 2,
+      safety_stock_method: 'days_of_supply',
+      safety_stock_value: 2,
+      order_multiple: 1,
+      min_order_value: null,
+      consolidate_orders: true
+    }
+
+    // Days between deliveries — this is the key replenishment window
+    const daysBetweenDeliveries = presets.deliveries_per_week > 0
+      ? 7 / presets.deliveries_per_week
+      : 7
+
     const settings = {
-      leadTimeSafetyBuffer: options.leadTimeSafetyBuffer ?? 3,
-      criticalThresholdDays: options.criticalThresholdDays ?? 3,
-      urgentThresholdDays: options.urgentThresholdDays ?? 7,
+      leadTimeSafetyBuffer: options.leadTimeSafetyBuffer ?? presets.safety_stock_days,
+      criticalThresholdDays: options.criticalThresholdDays ?? Math.max(1, Math.floor(daysBetweenDeliveries)),
+      urgentThresholdDays: options.urgentThresholdDays ?? Math.max(3, Math.ceil(daysBetweenDeliveries * 2)),
       includeOptional: options.includeOptional ?? true
     }
 
@@ -114,7 +176,7 @@ export class ReorderReportService {
       .eq('id', companyId)
       .single()
 
-    // Get all products with inventory data
+    // Get all products with inventory data and stock levels
     const { data: products } = await this.supabase
       .from('products')
       .select(`
@@ -124,6 +186,12 @@ export class ReorderReportService {
           supplier_sku,
           supplier_price,
           lead_time_days
+        ),
+        stock:inventory_stock!product_id(
+          quantity_on_hand,
+          reorder_point,
+          reorder_quantity,
+          shop_id
         )
       `)
       .eq('company_id', companyId)
@@ -192,9 +260,20 @@ export class ReorderReportService {
       const avgDailyUsage = totalUsed90Days / 90
       const avgWeeklyUsage = avgDailyUsage * 7
 
-      const currentStock = product.quantity_on_hand || 0
-      const reorderPoint = product.reorder_point || product.min_quantity || 0
-      const parLevel = product.par_level || product.max_quantity || reorderPoint * 2
+      // Get stock data from inventory_stock join (filter to this shop)
+      const stockRecords = Array.isArray(product.stock) ? product.stock : (product.stock ? [product.stock] : [])
+      const stockRow = stockRecords.find((s: any) => s.shop_id === companyId) || stockRecords[0]
+
+      const currentStock = stockRow?.quantity_on_hand ?? product.quantity_on_hand ?? 0
+      // Use inventory_stock reorder_point if > 0, else product-level, else company preset
+      const stockReorderPoint = stockRow?.reorder_point ?? 0
+      const reorderPoint = stockReorderPoint > 0
+        ? stockReorderPoint
+        : presets.default_reorder_point
+      // Par level = reorder point + order quantity (enough to cover until next delivery)
+      const stockReorderQty = stockRow?.reorder_quantity ?? 0
+      const orderQty = stockReorderQty > 0 ? stockReorderQty : presets.default_order_quantity
+      const parLevel = reorderPoint + orderQty
 
       // Calculate days of stock remaining
       const daysOfStockRemaining = avgDailyUsage > 0
@@ -247,15 +326,25 @@ export class ReorderReportService {
       }
 
       // Calculate suggested order quantity
-      const orderMultiple = product.order_multiple || 1
+      const orderMultiple = product.order_multiple || presets.order_multiple || 1
       const minOrderQty = product.min_order_qty || 1
 
-      // Order up to par level, considering lead time
-      let suggestedQty = parLevel - currentStock
+      // Order enough to cover until the next delivery + safety stock
+      // daysBetweenDeliveries accounts for the shop's delivery schedule
+      let suggestedQty: number
+
       if (avgDailyUsage > 0) {
-        // Add extra for lead time coverage
-        suggestedQty = Math.max(suggestedQty, avgDailyUsage * effectiveLeadTime)
+        // Usage-based: order enough for the delivery cycle + safety
+        const usageTilNextDelivery = avgDailyUsage * daysBetweenDeliveries
+        const safetyQty = avgDailyUsage * presets.safety_stock_days
+        suggestedQty = Math.ceil(usageTilNextDelivery + safetyQty) - currentStock
+        // At minimum, order the default order quantity
+        suggestedQty = Math.max(suggestedQty, presets.default_order_quantity)
+      } else {
+        // No usage data: order up to par level or default order qty
+        suggestedQty = Math.max(parLevel - currentStock, presets.default_order_quantity)
       }
+
       suggestedQty = Math.max(suggestedQty, minOrderQty)
 
       // Round to order multiple
@@ -323,10 +412,22 @@ export class ReorderReportService {
       generatedAt: new Date().toISOString(),
       companyId,
       companyName: company?.name || '',
-      reportPeriod: 'Based on 90-day consumption history',
+      reportPeriod: `Based on 90-day consumption history · ${presets.deliveries_per_week}x/week delivery`,
       summary,
       items,
-      settings
+      settings,
+      companyPresets: {
+        defaultReorderPoint: presets.default_reorder_point,
+        defaultOrderQuantity: presets.default_order_quantity,
+        deliveriesPerWeek: presets.deliveries_per_week,
+        deliverySchedule: presets.delivery_schedule,
+        deliveryDays: presets.delivery_days || [],
+        leadTimeDays: presets.lead_time_days,
+        daysBetweenDeliveries: Math.round(daysBetweenDeliveries * 10) / 10,
+        safetyStockDays: presets.safety_stock_days,
+        maxInventoryDollars: presets.max_inventory_dollars,
+        minInventoryDollars: presets.min_inventory_dollars,
+      }
     }
   }
 
