@@ -193,7 +193,7 @@ export async function GET(request: NextRequest) {
 
     // Build benchmark aggregates per group
     const benchmarks: BenchmarkGroup[] = []
-    for (const [key, members] of groups) {
+    for (const [key, members] of Array.from(groups.entries())) {
       if (members.length === 0) continue
 
       const computeStats = (getValue: (m: CompanyMetrics) => number, lowerIsBetter: boolean) => {

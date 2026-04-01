@@ -118,7 +118,7 @@ export default function AnalyticsReportsPage() {
         engine.analyzeWaste(companyId, 30),
         engine.analyzeConsumptionPatterns(companyId)
       ])
-      setProjection(proj)
+      setProjection('insufficient_data' in proj ? null : proj)
       setWasteAnalysis(waste)
       setPatterns(consumptionPatterns.slice(0, 10))
     } catch (error) {

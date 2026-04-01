@@ -82,7 +82,7 @@ export async function GET(request: NextRequest) {
     const { data: recentLogs, count: totalCount } = await recentQuery
 
     // Get company names for display (anonymized IDs to names)
-    const companyIds = [...new Set((recentLogs || []).map(l => l.company_id).filter(Boolean))]
+    const companyIds = Array.from(new Set((recentLogs || []).map(l => l.company_id).filter(Boolean)))
     const { data: companies } = await supabase
       .from('companies')
       .select('id, name')
