@@ -106,6 +106,7 @@ export default function DashboardNav({ user, profile, companies = [] }: Dashboar
     { name: 'Benchmarks', href: '/dashboard/admin/benchmarks', icon: BarChart3, show: userRole === 'super_admin' },
     { name: 'AI Activity', href: '/dashboard/admin/activity', icon: Activity, show: userRole === 'super_admin' },
     { name: 'Audit Export', href: '/dashboard/admin/audit-export', icon: FileText, show: userRole === 'super_admin' },
+    { name: 'Calculations', href: '/dashboard/admin/calculations', icon: BarChart3, show: userRole === 'super_admin' },
     { name: 'Help', href: '/dashboard/help', icon: HelpCircle, show: true },
   ].filter(item => item.show)
 
